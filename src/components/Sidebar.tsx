@@ -3,7 +3,11 @@ import { useBookmarkStore } from "../store/bookmarkStore";
 import { Folder, Plus, Edit2, Trash2, Settings } from "lucide-react";
 import { Category } from "../types/bookmark";
 
-export const Sidebar: React.FC = () => {
+interface SidebarProps {
+  onAddCategory?: () => void;
+}
+
+export const Sidebar: React.FC<SidebarProps> = ({ onAddCategory }) => {
   const { categories, selectedCategory, setSelectedCategory, setSettingsOpen, bookmarks, setBookmarks, setCategories } =
     useBookmarkStore();
     
@@ -13,17 +17,66 @@ export const Sidebar: React.FC = () => {
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
   const [editingCategoryName, setEditingCategoryName] = useState("");
 
+  // 计算字符串长度（中文算2个字符，其他算1个字符）
+  const calculateStringLength = (str: string): number => {
+    return str.split('').reduce((total, char) => {
+      return total + (/[^\x00-\xff]/.test(char) ? 2 : 1);
+    }, 0);
+  };
+
+  // 验证输入长度
+  const validateInput = (value: string): boolean => {
+    return calculateStringLength(value) <= 20;
+  };
+
   // 添加新分类
-  const handleAddCategory = () => {
-    if (newCategoryName.trim()) {
+  const handleAddCategory = async () => {
+    const trimmedName = newCategoryName.trim();
+    if (!trimmedName) {
+      alert('请输入分类名称');
+      return;
+    }
+
+    if (!validateInput(trimmedName)) {
+      alert('分类名称过长，请控制在10个中文或20个英文字符以内');
+      return;
+    }
+
+    // 检查分类名称是否重复
+    if (categories.some(cat => cat.name === trimmedName)) {
+      alert('该分类名称已存在，请使用其他名称');
+      return;
+    }
+
+    try {
+      // 使用Chrome API创建书签文件夹
+      const folder = await chrome.bookmarks.create({
+        title: trimmedName,
+        parentId: '2' // 在其他书签中创建
+      });
+
       const newCategory: Category = {
-        id: Date.now().toString(), // 简单生成唯一ID
-        name: newCategoryName.trim(),
-        bookmarkIds: []
+        id: folder.id,
+        name: folder.title,
+        bookmarkIds: [],
+        icon: "📁"
       };
-      setCategories([...categories, newCategory]);
+
+      // 更新本地状态
+      const updatedCategories = [...categories, newCategory];
+      setCategories(updatedCategories);
+
+      // 重置表单状态
       setNewCategoryName("");
       setIsAddingCategory(false);
+
+      // 如果还没有选中的分类，将新创建的分类设为选中
+      if (!selectedCategory) {
+        setSelectedCategory(folder.id);
+      }
+    } catch (error) {
+      console.error('创建书签分类失败:', error);
+      alert('创建分类失败，请重试');
     }
   };
 
@@ -80,16 +133,16 @@ export const Sidebar: React.FC = () => {
       className="w-64 bg-gray-50 border-r border-gray-200 h-screen flex flex-col"
       data-oid="hpvpsv0"
     >
-      <div className="flex justify-between items-center p-4">
+      <div className="flex justify-between items-center p-4 flex-shrink-0">
         <h2
           className="text-lg font-semibold text-gray-700"
           data-oid="w89f:n9"
         >
-          Categories
+          分类
         </h2>
         <div className="flex items-center gap-1">
           <button 
-            onClick={() => setIsAddingCategory(true)}
+            onClick={() => onAddCategory ? onAddCategory() : setIsAddingCategory(true)}
             className="p-1 hover:bg-gray-200 rounded-full" 
             title="添加分类"
           >
@@ -109,7 +162,7 @@ export const Sidebar: React.FC = () => {
       
       {/* 添加分类表单 */}
       {isAddingCategory && (
-        <div className="mx-2 mb-2 p-2 border border-gray-200 rounded-md bg-gray-100">
+        <div className="mx-2 mb-2 p-2 border border-gray-200 rounded-md bg-gray-100 flex-shrink-0">
           <input
             type="text"
             value={newCategoryName}
@@ -139,7 +192,7 @@ export const Sidebar: React.FC = () => {
         </div>
       )}
       
-      <nav className="flex-1 overflow-y-auto space-y-1 px-2" data-oid="pcd:n-h">
+      <nav className="flex-1 overflow-y-auto space-y-1 px-2 max-h-[calc(100vh-8rem)] custom-scrollbar overflow-x-hidden" data-oid="pcd:n-h">
         {categories.map((category) => (
           <div 
             key={category.id}
@@ -181,7 +234,10 @@ export const Sidebar: React.FC = () => {
                   className="flex items-center gap-2 flex-grow text-left"
                   onClick={() => setSelectedCategory(category.id)}
                 >
-                  <Folder className="h-4 w-4" data-oid="p8-:q_-" />
+                  <div
+                    className="w-4 h-4 rounded-full"
+                    style={{ backgroundColor: `hsl(${parseInt(category.id) * 137 % 360}, 70%, 50%)` }}
+                  />
                   <span className="font-inherit" data-oid="5o4mv35">
                     {category.name}
                   </span>

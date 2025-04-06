@@ -12,17 +12,66 @@ export const CategoryManager: React.FC = () => {
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
   const [editingCategoryName, setEditingCategoryName] = useState("");
 
+  // 计算字符串长度（中文算2个字符，其他算1个字符）
+  const calculateStringLength = (str: string): number => {
+    return str.split('').reduce((total, char) => {
+      return total + (/[^\x00-\xff]/.test(char) ? 2 : 1);
+    }, 0);
+  };
+
+  // 验证输入长度
+  const validateInput = (value: string): boolean => {
+    return calculateStringLength(value) <= 20;
+  };
+
   // 添加新分类
-  const handleAddCategory = () => {
-    if (newCategoryName.trim()) {
+  const handleAddCategory = async () => {
+    const trimmedName = newCategoryName.trim();
+    if (!trimmedName) {
+      alert('请输入分类名称');
+      return;
+    }
+
+    if (!validateInput(trimmedName)) {
+      alert('分类名称过长，请控制在10个中文或20个英文字符以内');
+      return;
+    }
+
+    // 检查分类名称是否重复
+    if (categories.some(cat => cat.name === trimmedName)) {
+      alert('该分类名称已存在，请使用其他名称');
+      return;
+    }
+
+    try {
+      // 使用Chrome API创建书签文件夹
+      const folder = await chrome.bookmarks.create({
+        title: trimmedName,
+        parentId: '2' // 在其他书签中创建
+      });
+
       const newCategory: Category = {
-        id: Date.now().toString(), // 简单生成唯一ID
-        name: newCategoryName.trim(),
-        bookmarkIds: []
+        id: folder.id,
+        name: folder.title,
+        bookmarkIds: [],
+        icon: "📁"
       };
-      setCategories([...categories, newCategory]);
+
+      // 更新本地状态
+      const updatedCategories = [...categories, newCategory];
+      setCategories(updatedCategories);
+
+      // 重置表单状态
       setNewCategoryName("");
       setIsAddingCategory(false);
+
+      // 如果还没有选中的分类，将新创建的分类设为选中
+      if (!useBookmarkStore.getState().selectedCategory) {
+        useBookmarkStore.getState().setSelectedCategory(folder.id);
+      }
+    } catch (error) {
+      console.error('创建书签分类失败:', error);
+      alert('创建分类失败，请重试');
     }
   };
 
@@ -32,17 +81,27 @@ export const CategoryManager: React.FC = () => {
     setEditingCategoryName(category.name);
   };
 
-  const saveEditingCategory = () => {
+  const saveEditingCategory = async () => {
     if (editingCategoryId && editingCategoryName.trim()) {
-      setCategories(
-        categories.map(cat =>
-          cat.id === editingCategoryId
-            ? { ...cat, name: editingCategoryName.trim() }
-            : cat
-        )
-      );
-      setEditingCategoryId(null);
-      setEditingCategoryName("");
+      try {
+        // 使用Chrome API更新书签文件夹
+        await chrome.bookmarks.update(editingCategoryId, {
+          title: editingCategoryName.trim()
+        });
+
+        setCategories(
+          categories.map(cat =>
+            cat.id === editingCategoryId
+              ? { ...cat, name: editingCategoryName.trim() }
+              : cat
+          )
+        );
+        setEditingCategoryId(null);
+        setEditingCategoryName("");
+      } catch (error) {
+        console.error('更新书签分类失败:', error);
+        alert('更新分类失败，请重试');
+      }
     }
   };
 
@@ -52,41 +111,67 @@ export const CategoryManager: React.FC = () => {
 
   // 删除分类
   const handleDeleteCategory = (categoryId: string) => {
+    // 检查是否为'未分类'项
+    const categoryToDelete = categories.find(cat => cat.id === categoryId);
+    if (categoryToDelete?.name === '未分类') {
+      alert('默认分类"未分类"不能删除');
+      return;
+    }
     setCategoryToDeleteId(categoryId);
     setDeleteConfirmOpen(true);
   };
 
   // 确认删除
-  const handleDeleteConfirm = () => {
+  const handleDeleteConfirm = async () => {
     if (!categoryToDeleteId) return;
 
-    // 获取要删除的分类下的所有书签
-    const categoryToDelete = categories.find(cat => cat.id === categoryToDeleteId);
-    if (!categoryToDelete) return;
+    try {
+      // 获取要删除的分类下的所有书签
+      const categoryToDelete = categories.find(cat => cat.id === categoryToDeleteId);
+      if (!categoryToDelete) return;
 
-    // 更新书签，将被删除分类的书签设为未分类
-    const updatedBookmarks = { ...bookmarks };
-    categoryToDelete.bookmarkIds.forEach(bookmarkId => {
-      if (updatedBookmarks[bookmarkId]) {
-        updatedBookmarks[bookmarkId] = {
-          ...updatedBookmarks[bookmarkId],
-          category: undefined
-        };
+      // 获取分类下的所有书签
+      const bookmarksToMove = Object.values(bookmarks).filter(bookmark => bookmark.category === categoryToDeleteId);
+
+      // 将书签移动到'其他书签'分类下
+      for (const bookmark of bookmarksToMove) {
+        try {
+          await chrome.bookmarks.move(bookmark.id, {
+            parentId: '2' // Chrome API的'其他书签'分类ID
+          });
+        } catch (error) {
+          console.error(`移动书签失败: ${bookmark.title}`, error);
+        }
       }
-    });
-    setBookmarks(updatedBookmarks);
-    
-    // 删除分类
-    setCategories(categories.filter(cat => cat.id !== categoryToDeleteId));
 
-    // 如果当前选中的是被删除的分类，清除选中状态
-    if (useBookmarkStore.getState().selectedCategory === categoryToDeleteId) {
-      useBookmarkStore.getState().setSelectedCategory(null);
+      // 删除空的分类文件夹
+      await chrome.bookmarks.removeTree(categoryToDeleteId);
+
+      // 更新本地状态
+      const updatedBookmarks = { ...bookmarks };
+      bookmarksToMove.forEach(bookmark => {
+        updatedBookmarks[bookmark.id] = {
+          ...bookmark,
+          category: '2' // 更新为'其他书签'分类
+        };
+      });
+      setBookmarks(updatedBookmarks);
+      
+      // 删除分类
+      setCategories(categories.filter(cat => cat.id !== categoryToDeleteId));
+
+      // 如果当前选中的是被删除的分类，清除选中状态
+      if (useBookmarkStore.getState().selectedCategory === categoryToDeleteId) {
+        useBookmarkStore.getState().setSelectedCategory(null);
+      }
+
+      // 关闭确认弹层
+      setDeleteConfirmOpen(false);
+      setCategoryToDeleteId(null);
+    } catch (error) {
+      console.error('删除书签分类失败:', error);
+      alert('删除分类失败，请重试');
     }
-
-    // 关闭确认弹层
-    setDeleteConfirmOpen(false);
-    setCategoryToDeleteId(null);
   };
 
   // 取消删除
@@ -96,7 +181,7 @@ export const CategoryManager: React.FC = () => {
   };
 
   return (
-    <div className="p-4 bg-white rounded-lg shadow">
+    <div className="p-4 bg-white rounded-lg shadow max-h-[60vh] overflow-y-auto">
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-xl font-bold">分类管理</h2>
         <button
@@ -116,8 +201,13 @@ export const CategoryManager: React.FC = () => {
             <input
               type="text"
               value={newCategoryName}
-              onChange={(e) => setNewCategoryName(e.target.value)}
-              placeholder="输入分类名称"
+              onChange={(e) => {
+                const value = e.target.value;
+                if (validateInput(value)) {
+                  setNewCategoryName(value);
+                }
+              }}
+              placeholder="输入分类名称（最多10个中文或20个英文字符）"
               className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
               autoFocus
             />
@@ -153,7 +243,12 @@ export const CategoryManager: React.FC = () => {
                 <input
                   type="text"
                   value={editingCategoryName}
-                  onChange={(e) => setEditingCategoryName(e.target.value)}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    if (validateInput(value)) {
+                      setEditingCategoryName(value);
+                    }
+                  }}
                   className="flex-1 px-3 py-1 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                   autoFocus
                 />
@@ -177,7 +272,6 @@ export const CategoryManager: React.FC = () => {
             ) : (
               <>
                 <div className="flex items-center gap-2">
-                  <Folder className="h-4 w-4 text-blue-600" />
                   <span className="font-medium">{category.name}</span>
                 </div>
                 <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200" style={{ pointerEvents: 'all' }}>
