@@ -668,20 +668,153 @@ export const BookmarkList: React.FC = () => {
         <EditBookmarkModal
           bookmark={editingBookmark}
           onSubmit={(title, url, tags, summary, category) => {
-            // 更新书签数据，确保标签直接绑定到书签对象
-            const updatedBookmarks = { ...bookmarks };
-            updatedBookmarks[editingBookmark.id] = {
-              ...editingBookmark,
-              title,
-              url,
-              // 直接将标签数组绑定到书签对象
-              tags: tags,
-              summary,
-              category
+            // 创建一个函数来更新本地状态，确保在Chrome API操作完成后调用
+            const updateLocalState = () => {
+              const updatedBookmarks = { ...bookmarks };
+              updatedBookmarks[editingBookmark.id] = {
+                ...editingBookmark,
+                title,
+                url,
+                // 直接将标签数组绑定到书签对象
+                tags: tags,
+                summary,
+                category
+              };
+              setBookmarks(updatedBookmarks);
+              setIsEditModalOpen(false);
+              setEditingBookmark(null);
             };
-            setBookmarks(updatedBookmarks);
-            setIsEditModalOpen(false);
-            setEditingBookmark(null);
+            
+            // 定义一个变量来跟踪是否需要等待Chrome API操作完成
+            let waitForChromeApi = false;
+            
+            // 如果分类发生变化，使用Chrome书签API更新书签的父文件夹
+            if (typeof chrome !== 'undefined' && chrome.bookmarks && category !== editingBookmark.category) {
+              waitForChromeApi = true; // 需要等待Chrome API操作完成
+              console.log(`正在移动书签 ${editingBookmark.id} 从分类 ${editingBookmark.category} 到分类 ${category}`);
+              try {
+                // 先获取书签当前信息，确认其当前父文件夹ID
+                chrome.bookmarks.get(editingBookmark.id, (currentResults) => {
+                  if (currentResults && currentResults.length > 0) {
+                    const currentBookmark = currentResults[0];
+                    console.log('移动前的书签信息:', currentBookmark);
+                    console.log('当前父文件夹ID:', currentBookmark.parentId);
+                    console.log('目标父文件夹ID:', category);
+                    
+                    // 获取当前分类的详细信息，用于调试
+                    chrome.bookmarks.get(currentBookmark.parentId, (parentInfo) => {
+                      if (parentInfo && parentInfo.length > 0) {
+                        console.log('当前父文件夹信息:', parentInfo[0]);
+                      }
+                    });
+                    
+                    // 获取目标分类的详细信息，用于调试
+                    chrome.bookmarks.get(category, (targetInfo) => {
+                      if (targetInfo && targetInfo.length > 0) {
+                        console.log('目标父文件夹信息:', targetInfo[0]);
+                      }
+                    });
+                    
+                    // 执行移动操作
+                    chrome.bookmarks.move(editingBookmark.id, {
+                      parentId: category
+                    }).then(() => {
+                      console.log(`书签 ${editingBookmark.id} 已成功移动到分类 ${category}`);
+                      
+                      // 验证书签是否已正确移动到新分类
+                      chrome.bookmarks.get(editingBookmark.id, (results) => {
+                        if (results && results.length > 0) {
+                          const updatedBookmark = results[0];
+                          console.log('移动后的书签信息:', updatedBookmark);
+                          
+                          // 确认父文件夹ID是否与目标分类匹配
+                          if (updatedBookmark.parentId !== category) {
+                            console.warn('书签分类同步失败: Chrome书签管理器中的父文件夹ID与目标分类不匹配');
+                            console.warn(`期望: ${category}, 实际: ${updatedBookmark.parentId}`);
+                            
+                            // 尝试再次移动
+                            console.log('尝试再次移动书签...');
+                            chrome.bookmarks.move(editingBookmark.id, {
+                              parentId: category
+                            }).then(() => {
+                              // 再次移动成功后更新本地状态
+                              updateLocalState();
+                            }).catch(retryError => {
+                              console.error('再次移动书签失败:', retryError);
+                              // 即使再次移动失败，也更新本地状态
+                              updateLocalState();
+                            });
+                          } else {
+                            console.log('书签分类同步成功!');
+                            // 移动成功后更新本地状态
+                            updateLocalState();
+                          }
+                        } else {
+                          // 如果无法获取书签信息，也更新本地状态
+                          updateLocalState();
+                        }
+                      });
+                      
+                      // 添加一个延时检查，确保异步操作完成后再次验证
+                      setTimeout(() => {
+                        chrome.bookmarks.get(editingBookmark.id, (finalResults) => {
+                          if (finalResults && finalResults.length > 0) {
+                            const finalBookmark = finalResults[0];
+                            console.log('最终书签状态:', finalBookmark);
+                            if (finalBookmark.parentId !== category) {
+                              console.warn('最终检查: 书签分类同步失败');
+                            } else {
+                              console.log('最终检查: 书签分类同步成功');
+                            }
+                          }
+                        });
+                      }, 1000); // 1秒后检查
+                    }).catch(error => {
+                      console.error('移动书签失败:', error);
+                      if (chrome.runtime.lastError) {
+                        console.error('Chrome API错误:', chrome.runtime.lastError);
+                      }
+                      // 即使移动失败，也更新本地状态
+                      updateLocalState();
+                    });
+                  } else {
+                    // 如果无法获取书签信息，也更新本地状态
+                    updateLocalState();
+                  }
+                });
+              } catch (error) {
+                console.error('调用Chrome书签API失败:', error);
+                // 出现异常时也更新本地状态
+                updateLocalState();
+              }
+            }
+            
+            // 更新标题等其他属性
+            if (typeof chrome !== 'undefined' && chrome.bookmarks && 
+                (title !== editingBookmark.title || url !== editingBookmark.url)) {
+              if (!waitForChromeApi) { // 如果不需要等待分类变更，则设置等待标题更新
+                waitForChromeApi = true;
+              }
+              chrome.bookmarks.update(editingBookmark.id, {
+                title: title,
+                url: url
+              }).then(() => {
+                console.log(`书签 ${editingBookmark.id} 的标题和URL已更新`);
+                if (!waitForChromeApi) { // 如果不需要等待其他操作，则更新本地状态
+                  updateLocalState();
+                }
+              }).catch(error => {
+                console.error('更新书签属性失败:', error);
+                if (!waitForChromeApi) { // 即使更新失败，也更新本地状态
+                  updateLocalState();
+                }
+              });
+            }
+            
+            // 如果不需要等待Chrome API操作，直接更新本地状态
+            if (!waitForChromeApi) {
+              updateLocalState();
+            }
           }}
           onCancel={() => {
             setIsEditModalOpen(false);

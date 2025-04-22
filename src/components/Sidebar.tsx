@@ -1,15 +1,28 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useBookmarkStore } from "../store/bookmarkStore";
-import { Folder, Plus, Edit2, Trash2, Settings } from "lucide-react";
+import { Folder, Plus, Edit2, Trash2, RefreshCw, X } from "lucide-react";
 import { Category } from "../types/bookmark";
+import { Tabs } from "./Tabs";
 
 interface SidebarProps {
   onAddCategory?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({ onAddCategory }) => {
-  const { categories, selectedCategory, setSelectedCategory, setSettingsOpen, bookmarks, setBookmarks, setCategories } =
-    useBookmarkStore();
+  const { 
+    categories, 
+    smartCategories,
+    selectedCategory, 
+    setSelectedCategory, 
+    bookmarks, 
+    setBookmarks, 
+    setCategories,
+    activeTab,
+    setActiveTab,
+    generateSmartCategories,
+    isLoading,
+    error
+  } = useBookmarkStore();
     
   // 状态管理
   const [isAddingCategory, setIsAddingCategory] = useState(false);
@@ -128,35 +141,108 @@ export const Sidebar: React.FC<SidebarProps> = ({ onAddCategory }) => {
     }
   };
 
+  // 处理标签页切换
+  const handleTabChange = (tab: string) => {
+    setActiveTab(tab as 'categories' | 'smart');
+    // 切换到智能标签页时，如果没有智能分类，则自动生成
+    if (tab === 'smart' && smartCategories.length === 0) {
+      generateSmartCategories();
+    }
+  };
+
+  // 刷新智能分类 - 用户主动触发生成智能分类
+  const handleRefreshSmartCategories = async () => {
+    // 获取API设置状态
+    const apiKey = useBookmarkStore.getState().apiKey;
+    const apiUrl = useBookmarkStore.getState().apiUrl;
+    
+    // 如果正在加载中，点击则取消刷新
+    if (isLoading) {
+      // 调用取消生成方法
+      useBookmarkStore.getState().cancelSmartCategoriesGeneration();
+      alert('已取消智能分类生成');
+      return;
+    }
+    
+    // 检查是否有足够的书签数据
+    const bookmarksCount = Object.keys(bookmarks).length;
+    if (bookmarksCount === 0) {
+      alert('没有书签数据，无法生成智能分类。请先添加一些书签。');
+      return;
+    }
+    
+    // 显示确认对话框
+    if (confirm('确定要刷新智能分类吗？这将根据当前所有书签的标签和描述重新生成分类。')) {
+      // 如果没有设置API，提示用户但仍然继续（会使用基于标签的回退方案）
+      if (!apiKey || !apiUrl) {
+        alert('注意：未设置AI API，将使用基本的标签分类方法。要获得更智能的分类，请在设置中配置API。');
+      }
+      
+      try {
+        // 调用生成智能分类方法
+        await generateSmartCategories();
+        
+        // 检查是否有错误
+        const currentError = useBookmarkStore.getState().error;
+        if (currentError) {
+          alert(`生成智能分类时出错: ${currentError}`);
+          return;
+        }
+        
+        // 成功生成分类后提示用户
+        if (useBookmarkStore.getState().smartCategories.length > 0) {
+          alert('智能分类已成功生成！');
+        } else {
+          alert('未能生成智能分类，可能是因为书签数据不足或没有足够的标签信息。');
+        }
+      } catch (error) {
+        console.error('生成智能分类失败:', error);
+        alert('生成智能分类失败，请检查控制台获取详细错误信息。');
+      }
+    }
+  };
+
+  // 获取当前显示的分类列表
+  const currentCategories = activeTab === 'categories' ? categories : smartCategories;
+
   return (
     <aside
       className="w-64 bg-gray-50 border-r border-gray-200 h-screen flex flex-col"
       data-oid="hpvpsv0"
     >
+      <Tabs 
+        activeTab={activeTab}
+        onTabChange={handleTabChange}
+        tabs={[
+          { id: 'categories', label: '分类' },
+          { id: 'smart', label: '智能' }
+        ]}
+      />
       <div className="flex justify-between items-center p-4 flex-shrink-0">
         <h2
           className="text-lg font-semibold text-gray-700"
           data-oid="w89f:n9"
         >
-          分类
+          {activeTab === 'categories' ? '分类' : '智能分类'}
         </h2>
         <div className="flex items-center gap-1">
-          <button 
-            onClick={() => onAddCategory ? onAddCategory() : setIsAddingCategory(true)}
-            className="p-1 hover:bg-gray-200 rounded-full" 
-            title="添加分类"
-          >
-            <Plus className="h-4 w-4" />
-          </button>
-          <button 
-            onClick={() => {
-              setSettingsOpen(true);
-            }}
-            className="p-1 hover:bg-gray-200 rounded-full" 
-            title="设置"
-          >
-            <Settings className="h-4 w-4" />
-          </button>
+          {activeTab === 'categories' ? (
+            <button 
+              onClick={() => onAddCategory ? onAddCategory() : setIsAddingCategory(true)}
+              className="p-1 hover:bg-gray-200 rounded-full" 
+              title="添加分类"
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+          ) : (
+            <button 
+              onClick={handleRefreshSmartCategories}
+              className="p-1 hover:bg-gray-200 rounded-full" 
+              title={isLoading ? "点击取消刷新" : "刷新智能分类"}
+            >
+              <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
+            </button>
+          )}
         </div>
       </div>
       
@@ -193,7 +279,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ onAddCategory }) => {
       )}
       
       <nav className="flex-1 overflow-y-auto space-y-1 px-2 max-h-[calc(100vh-8rem)] custom-scrollbar overflow-x-hidden" data-oid="pcd:n-h">
-        {categories.map((category) => (
+        {/* 确保未分类文件夹始终显示在智能标签页中 */}
+        {currentCategories.map((category) => (
           <div 
             key={category.id}
             className={`group flex items-center justify-between w-full px-3 py-2 ${selectedCategory === category.id ? "bg-gray-200 text-gray-900" : "text-gray-700 hover:bg-gray-100"} rounded-lg transition-colors`}
@@ -225,7 +312,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onAddCategory }) => {
                   className="p-1 text-gray-600 hover:text-gray-800"
                   title="取消"
                 >
-                  <Trash2 size={14} />
+                  <X size={14} />
                 </button>
               </div>
             ) : (
@@ -234,29 +321,40 @@ export const Sidebar: React.FC<SidebarProps> = ({ onAddCategory }) => {
                   className="flex items-center gap-2 flex-grow text-left"
                   onClick={() => setSelectedCategory(category.id)}
                 >
-                  <div
-                    className="w-4 h-4 rounded-full"
-                    style={{ backgroundColor: `hsl(${parseInt(category.id) * 137 % 360}, 70%, 50%)` }}
-                  />
+                  {activeTab !== 'smart' && (
+                    <div
+                      className="w-4 h-4 rounded-full flex-shrink-0"
+                      style={{ backgroundColor: `hsl(${parseInt(category.id) * 137 % 360}, 70%, 50%)` }}
+                    />
+                  )}
+                  {activeTab === 'smart' && (
+                    <span className="text-sm ml-1 mr-0.5">{category.icon || '🏷️'}</span>
+                  )}
                   <span className="font-inherit" data-oid="5o4mv35">
                     {category.name}
                   </span>
                 </button>
-                <div className="flex items-center opacity-0 group-hover:opacity-100">
-                  <button
-                    onClick={(e) => startEditingCategory(category, e)}
-                    className="p-1 text-gray-500 hover:text-blue-600"
-                    title="编辑分类"
-                  >
-                    <Edit2 size={14} />
-                  </button>
-                </div>
+                {activeTab === 'categories' && (
+                  <div className="flex items-center opacity-0 group-hover:opacity-100">
+                    <button
+                      onClick={(e) => startEditingCategory(category, e)}
+                      className="p-1 text-gray-500 hover:text-blue-600"
+                      title="编辑分类"
+                    >
+                      <Edit2 size={14} />
+                    </button>
+                  </div>
+                )}
               </>
             )}
           </div>
         ))}
-        {categories.length === 0 && (
-          <div className="p-3 text-center text-gray-500 text-sm">暂无分类，请添加</div>
+        {currentCategories.length === 0 && (
+          <div className="p-3 text-center text-gray-500 text-sm">
+            {activeTab === 'categories' 
+              ? '暂无分类，请添加' 
+              : '暂无智能分类，正在生成...'}
+          </div>
         )}
       </nav>
     </aside>
