@@ -293,6 +293,121 @@ const saveBookmarkData = (settings: Partial<BookmarkState>): void => {
   }
 };
 
+/**
+ * 处理单批书签的AI分类
+ */
+const processBatchCategories = async (
+  bookmarksData: any[],
+  apiKey: string,
+  apiUrl: string,
+  selectedModel: string
+): Promise<any[]> => {
+  // 构建提交给AI的数据，使用极简化的提示词
+  const prompt = `
+分析书签，创建最多5个分类。书签数据：
+${JSON.stringify(bookmarksData, null, 0)}
+
+返回JSON格式：
+[{"name":"分类名","bookmarkIds":["id1","id2"],"description":"描述"}]
+`;
+
+  console.log('发送AI分类请求，书签数量:', bookmarksData.length);
+  
+  // 处理 API URL - Groq也使用标准的/chat/completions端点
+  const baseUrl = apiUrl.endsWith('/') ? apiUrl.slice(0, -1) : apiUrl;
+  const fullApiUrl = `${baseUrl}/chat/completions`;
+    
+  const requestBody = {
+    model: selectedModel || 'gpt-3.5-turbo',
+    messages: [
+      {
+        role: 'system',
+        content: '你是书签分类助手，返回标准JSON格式，无额外文本。'
+      },
+      {
+        role: 'user',
+        content: prompt
+      }
+    ],
+    temperature: 0.7
+  };
+  
+  const response = await fetch(fullApiUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify(requestBody)
+  });
+
+  if (!response.ok) {
+    throw new Error(`AI API请求失败: ${response.status} ${response.statusText}`);
+  }
+
+  const data = await response.json();
+  const aiResponse = data.choices[0].message.content;
+  
+  // 简化的JSON解析逻辑
+  try {
+    // 第一步：清理响应文本
+    let jsonStr = aiResponse.replace(/```(?:json)?[\r\n]?|```/g, '').trim();
+    jsonStr = jsonStr.replace(/^[\s\S]*?(\[)/m, '$1').replace(/(\])[\s\S]*?$/m, '$1');
+    
+    // 第二步：修复常见的JSON错误
+    jsonStr = jsonStr.replace(/'/g, '"'); // 单引号转双引号
+    jsonStr = jsonStr.replace(/,\s*\]/g, ']'); // 移除数组末尾逗号
+    jsonStr = jsonStr.replace(/,\s*\}/g, '}'); // 移除对象末尾逗号
+    
+    // 第三步：处理换行符和特殊字符
+    jsonStr = jsonStr.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+    
+    const categories = JSON.parse(jsonStr);
+    return Array.isArray(categories) ? categories : [];
+  } catch (parseError) {
+    console.error('JSON解析失败，尝试从响应中提取有效数据:', parseError);
+    
+    // 备用解析：尝试提取部分有效的分类数据
+    try {
+      const nameMatches = aiResponse.match(/"name"\s*:\s*"([^"]+)"/g) || [];
+      const bookmarkIdsMatches = aiResponse.match(/"bookmarkIds"\s*:\s*(\[[^\]]*\])/g) || [];
+      
+      if (nameMatches.length > 0) {
+        const categories = [];
+        for (let i = 0; i < Math.min(nameMatches.length, bookmarkIdsMatches.length); i++) {
+          const nameMatch = nameMatches[i].match(/"([^"]+)"$/);
+          const idsMatch = bookmarkIdsMatches[i].match(/(\[.*\])/);
+          
+          if (nameMatch && idsMatch) {
+            try {
+              const name = nameMatch[1];
+              const bookmarkIds = JSON.parse(idsMatch[1].replace(/'/g, '"'));
+              categories.push({
+                name,
+                bookmarkIds: Array.isArray(bookmarkIds) ? bookmarkIds : [],
+                description: `自动生成的${name}分类`
+              });
+            } catch (e) {
+              console.error('解析单个分类失败:', e);
+            }
+          }
+        }
+        
+        if (categories.length > 0) {
+          console.log('通过备用解析方法成功提取分类:', categories.length);
+          return categories;
+        }
+      }
+    } catch (fallbackError) {
+      console.error('备用解析也失败:', fallbackError);
+    }
+    
+    // 如果所有解析方法都失败，返回空数组
+    console.log('所有解析方法都失败，返回空数组');
+    return [];
+  }
+};
+
 export const useBookmarkStore = create<BookmarkState>((set, get) => ({
   bookmarks: {},
   categories: [],
@@ -610,13 +725,13 @@ export const useBookmarkStore = create<BookmarkState>((set, get) => ({
       // 使用所有书签数据，不再筛选只有标签或描述的书签
       const bookmarksWithMetadata = Object.values(bookmarks);
       
-      // 收集所有书签数据，用于提交给AI进行分析
+      // 收集所有书签数据，大幅优化数据量以避免413错误
       const bookmarksData = bookmarksWithMetadata.map(bookmark => ({
         id: bookmark.id,
-        title: bookmark.title,
-        url: bookmark.url,
-        tags: bookmark.tags || [],
-        summary: bookmark.summary || ''
+        title: bookmark.title.length > 50 ? bookmark.title.substring(0, 50) + '...' : bookmark.title,
+        url: bookmark.url.length > 100 ? bookmark.url.substring(0, 100) + '...' : bookmark.url,
+        tags: (bookmark.tags || []).slice(0, 3), // 进一步限制标签数量
+        summary: (bookmark.summary || '').length > 100 ? (bookmark.summary || '').substring(0, 100) + '...' : (bookmark.summary || '')
       }));
 
       
@@ -643,319 +758,103 @@ export const useBookmarkStore = create<BookmarkState>((set, get) => ({
         return;
       }
 
-      // 这里已经有了allBookmarkIds变量，不需要重复声明
-      
       // 如果有API密钥和URL，使用AI生成智能分类
       if (apiKey && apiUrl) {
         try {
           console.log('开始使用AI生成智能分类，API配置:', { apiUrl, modelName: selectedModel || 'gpt-3.5-turbo' });
+          // 如果书签数量过多，分批处理以避免413错误
+          const MAX_BOOKMARKS_PER_REQUEST = 15; // 进一步减少批次大小
+          const allCategorizedBookmarks: string[] = [];
+          const allGeneratedCategories: any[] = [];
           
-          // 构建提交给AI的数据，增强提示词以获得更好的分类效果
-          const prompt = `
-作为资深档案专家请分析以下书签数据，并创建不多于20个有意义的智能分类类别。每个类别应该能够归纳一组相关的书签。你的目标是便于用户进行信息检索。
-
-分析要求：
-1. 不要仅依赖标签，而是综合分析书签的标题、URL和内容摘要
-2. 创建有意义的分类名称，能够准确反映该类别下书签的共同主题
-3. 每个书签可以属于多个分类
-4. 尽量让每个书签都被分类，除非确实无法归类
-5. 请不要在分类名称中包含任何特殊字符，如逗号、引号、反斜杠等
-6. 同一个分类里，不可出现相同的书签ID
-7. 无法分类的书签归属到'未分类'中
-
-书签数据：
-${JSON.stringify(bookmarksData, null, 2)}
-
-【重要】你必须严格按照以下JSON格式返回分类结果，不要添加任何额外的文本、注释或解释。你的整个回复必须是一个有效的JSON数组，可以直接被JSON.parse()解析：
-[
-  {
-    "name": "分类名称",
-    "bookmarkIds": ["书签ID1", "书签ID2"],
-    "description": "简短描述该分类的主题和内容特点"
-  }
-]
-
-【格式要求】：
-1. 返回的必须是有效的JSON格式，使用双引号而非单引号
-2. 不要在JSON前后添加任何额外文本、代码块标记或解释
-3. 确保所有字符串都正确转义，特别是包含双引号或特殊字符的内容
-4. bookmarkIds数组必须只包含在提供的书签数据中存在的ID
-5. 返回的JSON必须可以直接被JSON.parse()解析，不要使用任何非标准JSON语法
-6. 不要在JSON中包含任何注释
-7. 不要使用undefined、NaN或函数等非JSON值
-8. 不要使用任何Markdown格式或代码块
-9. 不要包含任何换行符(\n)、回车符(\r)或制表符(\t)等特殊字符
-
-示例返回格式（请确保你的返回与此格式完全一致）：
-[
-  {
-    "name": "技术文档",
-    "bookmarkIds": ["123", "456"],
-    "description": "包含各类技术文档和API参考资料"
-  },
-  {
-    "name": "学习资源",
-    "bookmarkIds": ["789", "101"],
-    "description": "各类学习平台和教程网站"
-  }
-]
-`;
-
-          console.log('准备发送AI请求...');
-          
-          // 调用AI API
-          // 处理 API URL，确保正确的端点路径
-          const isGroqApi = apiUrl.toLowerCase().includes('groq.com');
-          const baseUrl = apiUrl.endsWith('/') ? apiUrl.slice(0, -1) : apiUrl;
-          const fullApiUrl = isGroqApi 
-            ? `${baseUrl}/completion`  // Groq API 使用 /completion 端点
-            : `${baseUrl}/chat/completions`;  // OpenAI API 使用 /chat/completions 端点
+          if (bookmarksData.length > MAX_BOOKMARKS_PER_REQUEST) {
+            console.log(`书签数量 (${bookmarksData.length}) 超过单次请求限制，开始分批处理...`);
+            console.log('初始等待3秒以避免频率限制...');
+            await new Promise(resolve => setTimeout(resolve, 3000)); // 初始延迟
             
-          console.log('构建的API URL:', fullApiUrl);
-          console.log('发送API请求到:', fullApiUrl);
-          
-          const requestBody = {
-              model: selectedModel || 'gpt-3.5-turbo',
-              messages: [
-                {
-                  role: 'system',
-                  content: '你是一个专业的书签分类助手，擅长根据书签的标题、URL、标签和描述进行智能分类。你的分类应该有意义且直观，能够帮助用户更好地组织和查找书签。你必须严格按照要求返回标准JSON格式，不添加任何额外文本、代码块标记或注释。'
-                },
-                {
-                  role: 'user',
-                  content: prompt
-                }
-              ],
-              temperature: 0.7
-            };
-            
-            console.log('API请求体:', JSON.stringify(requestBody));
-            
-            const response = await fetch(fullApiUrl, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
-              },
-              body: JSON.stringify(requestBody)
-          });
-
-          if (!response.ok) {
-            console.error(`AI API请求失败: ${response.status}`);
-            throw new Error(`AI API请求失败: ${response.status}`);
-          }
-
-          console.log('AI API请求成功，状态码:', response.status);
-          const data = await response.json();
-          console.log('AI API响应数据:', data);
-          const aiResponse = data.choices[0].message.content;
-          
-          // 尝试解析AI返回的JSON数据
-          try {
-            console.log('开始解析AI响应...');
-            console.log('原始AI响应:', aiResponse.substring(0, 200) + '...');
-            
-            // 使用更强大的正则表达式提取JSON数组部分
-            const jsonRegex = /\[\s*\{[\s\S]*?\}\s*\]/g;
-            const jsonMatches = aiResponse.match(jsonRegex);
-            
-            // 如果找到了JSON数组格式的内容，使用第一个匹配项
-            let jsonStr = '';
-            if (jsonMatches && jsonMatches.length > 0) {
-              jsonStr = jsonMatches[0];
-              console.log('通过正则表达式提取到JSON数组:', jsonStr.substring(0, 100) + '...');
-            } else {
-              // 如果没有找到JSON数组，尝试使用整个响应内容
-              jsonStr = aiResponse;
-              console.log('未找到JSON数组格式，使用完整响应');
-            }
-            
-            // 第一阶段清理：移除Markdown代码块标记和其他非JSON内容
-            jsonStr = jsonStr.replace(/```(?:json)?[\r\n]?|```/g, '').trim(); // 移除所有代码块标记
-            jsonStr = jsonStr.replace(/^[\s\S]*?(\[)/m, '$1'); // 移除JSON数组开始前的所有内容
-            jsonStr = jsonStr.replace(/(\])[\s\S]*?$/m, '$1'); // 移除JSON数组结束后的所有内容
-            
-            // 第二阶段清理：修复常见的JSON格式错误
-            jsonStr = jsonStr.replace(/'/g, '"'); // 将单引号替换为双引号
-            jsonStr = jsonStr.replace(/,\s*\]/g, ']'); // 移除数组末尾多余的逗号
-            jsonStr = jsonStr.replace(/,\s*\}/g, '}'); // 移除对象末尾多余的逗号
-            jsonStr = jsonStr.replace(/\\n/g, '\n'); // 处理转义的换行符
-            jsonStr = jsonStr.replace(/\\r/g, '\r'); // 处理转义的回车符
-            jsonStr = jsonStr.replace(/\\t/g, '\t'); // 处理转义的制表符
-            
-            // 第三阶段清理：处理可能的Unicode转义和不可见字符
-            jsonStr = jsonStr.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
-            
-            // 第四阶段清理：确保属性名使用双引号
-            jsonStr = jsonStr.replace(/([{,])\s*([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
-            
-            console.log('清理后的JSON字符串:', jsonStr.substring(0, 100) + '...');
-            
-            let aiCategories;
-            try {
-              // 尝试直接解析清理后的JSON
-              aiCategories = JSON.parse(jsonStr);
-              console.log('JSON解析成功，分类数量:', aiCategories.length);
-            } catch (jsonError) {
-              console.error('第一次JSON解析失败:', jsonError);
+            // 分批处理
+            for (let i = 0; i < bookmarksData.length; i += MAX_BOOKMARKS_PER_REQUEST) {
+              const batch = bookmarksData.slice(i, i + MAX_BOOKMARKS_PER_REQUEST);
+              console.log(`处理批次 ${Math.floor(i / MAX_BOOKMARKS_PER_REQUEST) + 1}/${Math.ceil(bookmarksData.length / MAX_BOOKMARKS_PER_REQUEST)}`);
               
-              // 尝试进一步修复和解析
               try {
-                // 检查是否有未闭合的引号或括号
-                let fixedStr = jsonStr;
+                const batchCategories = await processBatchCategories(batch, apiKey, apiUrl, selectedModel);
+                allGeneratedCategories.push(...batchCategories);
                 
-                // 修复可能的JSON语法错误
-                fixedStr = fixedStr
-                  // 修复未闭合的对象
-                  .replace(/(\{[^\}]*$)/g, '$1}')
-                  // 修复未闭合的数组
-                  .replace(/(\[[^\]]*$)/g, '$1]')
-                  // 修复缺少值的属性 ("key":,)
-                  .replace(/"([^"]+)"\s*:\s*,/g, '"$1":null,')
-                  // 修复缺少逗号的相邻属性
-                  .replace(/}\s*{/g, '},{')
-                  // 修复属性名后缺少值的情况
-                  .replace(/"([^"]+)"\s*:\s*(?=\s*[,\}])/g, '"$1":null')
-                  // 修复字符串中未转义的引号
-                  .replace(/(?<!\\)"([^"]*)(?<!\\)"([^"]*)(?<!\\)"([^"]*)(?<!\\)"/g, '"$1\\"$2\\"$3"')
-                  // 修复多余的逗号
-                  .replace(/,\s*([\}\]])/g, '$1');
-                
-                console.log('进一步修复后的JSON字符串:', fixedStr.substring(0, 100) + '...');
-                
-                // 尝试解析修复后的JSON
-                aiCategories = JSON.parse(fixedStr);
-                console.log('修复后JSON解析成功');
-              } catch (fixError) {
-                console.error('修复后JSON解析仍然失败:', fixError);
-                
-                // 最后尝试：使用更激进的方法提取和重构JSON
-                try {
-                  // 提取所有可能的键值对
-                  const nameMatches = jsonStr.match(/"name"\s*:\s*"([^"]+)"/g) || [];
-                  const bookmarkIdsMatches = jsonStr.match(/"bookmarkIds"\s*:\s*(\[[^\]]*\])/g) || [];
-                  const descriptionMatches = jsonStr.match(/"description"\s*:\s*"([^"]*)"/g) || [];
-                  
-                  // 如果至少找到了一些名称，尝试重建JSON
-                  if (nameMatches.length > 0) {
-                    console.log('尝试从部分匹配重建JSON...');
-                    
-                    // 构建一个最小化的有效JSON数组
-                    const reconstructedCategories = [];
-                    
-                    for (let i = 0; i < nameMatches.length; i++) {
-                      const nameMatch = nameMatches[i].match(/"([^"]+)"$/) || ['', '未命名分类'];
-                      const name = nameMatch[1];
-                      
-                      // 尝试获取对应的bookmarkIds
-                      let bookmarkIds = [];
-                      if (bookmarkIdsMatches[i]) {
-                        try {
-                          const idsJson = bookmarkIdsMatches[i].replace(/"bookmarkIds"\s*:\s*/, '');
-                          bookmarkIds = JSON.parse(idsJson);
-                        } catch (e) {
-                          console.error('解析bookmarkIds失败:', e);
-                        }
-                      }
-                      
-                      // 尝试获取对应的description
-                      let description = '';
-                      if (descriptionMatches[i]) {
-                        const descMatch = descriptionMatches[i].match(/"([^"]*)"$/) || ['', ''];
-                        description = descMatch[1];
-                      }
-                      
-                      reconstructedCategories.push({
-                        name,
-                        bookmarkIds,
-                        description
-                      });
-                    }
-                    
-                    aiCategories = reconstructedCategories;
-                    console.log('成功从部分匹配重建JSON，分类数量:', aiCategories.length);
-                  } else {
-                    // 如果无法提取任何分类名称，创建一个基本的分类结构
-                    console.log('无法从响应中提取分类数据，创建基本分类...');
-                    
-                    // 创建一个基本的分类，将所有书签放入"其他"分类
-                    aiCategories = [
-                      {
-                        name: "其他",
-                        bookmarkIds: allBookmarkIds,
-                        description: "自动创建的分类，包含所有书签"
-                      }
-                    ];
-                    
-                    console.log('创建了基本分类，包含所有书签');
+                // 收集已分类的书签ID
+                batchCategories.forEach(cat => {
+                  if (cat.bookmarkIds) {
+                    allCategorizedBookmarks.push(...cat.bookmarkIds);
                   }
-                } catch (reconstructError) {
-                  console.error('重建JSON失败:', reconstructError);
-                  
-                  // 即使在最坏的情况下也提供一个可用的分类
-                  console.log('所有解析方法都失败，创建应急分类...');
-                  aiCategories = [
-                    {
-                      name: "所有书签",
-                      bookmarkIds: allBookmarkIds,
-                      description: "包含所有书签的应急分类"
-                    }
-                  ];
+                });
+                
+                // 添加延迟避免429错误
+                if (i + MAX_BOOKMARKS_PER_REQUEST < bookmarksData.length) {
+                  await new Promise(resolve => setTimeout(resolve, 8000)); // 增加到8秒延迟
+                }
+              } catch (batchError) {
+                console.error(`批次 ${Math.floor(i / MAX_BOOKMARKS_PER_REQUEST) + 1} 处理失败:`, batchError);
+                // 如果是429错误，等待更长时间
+                if (batchError instanceof Error && (batchError.message.includes('429') || batchError.message.includes('Too Many Requests'))) {
+                  console.log('遇到频率限制，等待15秒后继续...');
+                  await new Promise(resolve => setTimeout(resolve, 15000)); // 增加到15秒
                 }
               }
             }
+          } else {
+            // 单次请求处理
+            console.log('书签数量适中，使用单次请求处理');
+            const singleBatchCategories = await processBatchCategories(bookmarksData, apiKey, apiUrl, selectedModel);
+            allGeneratedCategories.push(...singleBatchCategories);
             
-            // 验证并转换AI返回的分类数据
-            if (Array.isArray(aiCategories) && aiCategories.length > 0) {
-              // 创建一个新的智能分类数组，不包含未分类项
-              const smartCategories: Category[] = aiCategories.map((cat, index) => ({
-                id: `smart_${index}_${Date.now()}`,
-                name: cat.name,
-                bookmarkIds: Array.isArray(cat.bookmarkIds) ? cat.bookmarkIds : [],
-                icon: "🏷️", // 为智能分类添加标签图标
-                description: cat.description // 保存分类描述，如果有的话
-              }));
-              
-              // 收集已被AI分类的书签ID
-              const categorizedBookmarkIds = new Set<string>();
-              smartCategories.forEach(category => {
-                category.bookmarkIds.forEach(id => categorizedBookmarkIds.add(id));
-              });
-              
-              // 找出所有未被AI分类的书签（包括有标签有描述但AI未分类的，以及之前识别的无标签无描述的书签）
-              const aiUncategorizedBookmarks = bookmarksWithMetadata
-                .filter(bookmark => !categorizedBookmarkIds.has(bookmark.id))
-                .map(bookmark => bookmark.id);
-              
-              // 合并两类未分类书签：1. 无标签无描述的 2. 有标签有描述但AI未分类的
-              const uncategorizedBookmarks = [...new Set([...uncategorizedBookmarkIds, ...aiUncategorizedBookmarks])];
-              
-              console.log(`AI分类后：有标签有描述但未被分类的书签: ${aiUncategorizedBookmarks.length}, 最终未分类书签总数: ${uncategorizedBookmarks.length}`);
-              
-              // 创建最终的智能分类数组，包含AI生成的分类
-              const finalSmartCategories = [...smartCategories];
-              
-              // 在所有AI生成的分类之后添加固定的未分类类别
-              const fixedUncategorizedId = 'smart_uncategorized';
-              finalSmartCategories.push({
-                id: fixedUncategorizedId,
-                name: "未分类",
-                bookmarkIds: uncategorizedBookmarks,
-                icon: "📁" // 为未分类添加文件夹图标
-              });
-              
-              console.log(`AI分类完成，共生成 ${finalSmartCategories.length - 1} 个智能分类，有 ${uncategorizedBookmarks.length} 个书签归入未分类项`);
-              
-              // 更新状态并保存到localStorage
-              set({ smartCategories: finalSmartCategories });
-              saveSettingsToStorage({ smartCategories: finalSmartCategories });
-              return;
-            } else {
-              throw new Error('AI返回的分类数据无效');
-            }
-          } catch (parseError) {
-            console.error('解析AI响应失败:', parseError);
-            throw new Error('解析AI响应失败: ' + (parseError instanceof Error ? parseError.message : String(parseError)));
+            singleBatchCategories.forEach(cat => {
+              if (cat.bookmarkIds) {
+                allCategorizedBookmarks.push(...cat.bookmarkIds);
+              }
+            });
+          }
+
+          // 验证并转换AI返回的分类数据
+          if (allGeneratedCategories.length > 0) {
+            // 创建一个新的智能分类数组，不包含未分类项
+            const smartCategories: Category[] = allGeneratedCategories.map((cat, index) => ({
+              id: `smart_${index}_${Date.now()}`,
+              name: cat.name,
+              bookmarkIds: Array.isArray(cat.bookmarkIds) ? cat.bookmarkIds : [],
+              icon: "🏷️",
+              description: cat.description
+            }));
+            
+            // 收集已被AI分类的书签ID
+            const categorizedBookmarkIds = new Set<string>(allCategorizedBookmarks);
+            
+            // 找出所有未被AI分类的书签
+            const aiUncategorizedBookmarks = bookmarksWithMetadata
+              .filter(bookmark => !categorizedBookmarkIds.has(bookmark.id))
+              .map(bookmark => bookmark.id);
+            
+            // 合并两类未分类书签
+            const uncategorizedBookmarks = [...new Set([...uncategorizedBookmarkIds, ...aiUncategorizedBookmarks])];
+            
+            console.log(`AI分类完成，共生成 ${smartCategories.length} 个智能分类，有 ${uncategorizedBookmarks.length} 个书签归入未分类项`);
+            
+            // 创建最终的智能分类数组
+            const finalSmartCategories = [...smartCategories];
+            
+            // 添加未分类类别
+            finalSmartCategories.push({
+              id: 'smart_uncategorized',
+              name: "未分类",
+              bookmarkIds: uncategorizedBookmarks,
+              icon: "📁"
+            });
+            
+            // 更新状态并保存到localStorage
+            set({ smartCategories: finalSmartCategories });
+            saveSettingsToStorage({ smartCategories: finalSmartCategories });
+            return;
+          } else {
+            throw new Error('AI未返回有效的分类数据');
           }
         } catch (aiError) {
           console.error('AI分类失败:', aiError);
@@ -1005,23 +904,21 @@ ${JSON.stringify(bookmarksData, null, 2)}
  * 初始化书签存储
  * 从localStorage加载设置并初始化store
  */
-(async () => {
-  try {
-    // 加载设置
-    const settings = await loadSettingsFromStorage();
-    
-    // 初始化store状态
-    useBookmarkStore.setState(settings);
-    
-    console.log('初始化store完成，当前设置状态:', {
-      apiKey: settings.apiKey ? '已设置' : '未设置',
-      apiUrl: settings.apiUrl,
-      selectedModel: settings.selectedModel,
-      useWebCrawler: settings.useWebCrawler
+function initializeBookmarkStore() {
+  loadSettingsFromStorage()
+    .then(settings => {
+      useBookmarkStore.setState(settings);
+      console.log('初始化store完成，当前设置状态:', {
+        apiKey: settings.apiKey ? '已设置' : '未设置',
+        apiUrl: settings.apiUrl,
+        selectedModel: settings.selectedModel,
+        useWebCrawler: settings.useWebCrawler
+      });
+    })
+    .catch(error => {
+      console.error('初始化store失败:', error);
+      useBookmarkStore.setState(DEFAULT_SETTINGS);
     });
-  } catch (error) {
-    console.error('初始化store失败:', error);
-    // 使用默认设置初始化
-    useBookmarkStore.setState(DEFAULT_SETTINGS);
-  }
-})();
+}
+
+initializeBookmarkStore();

@@ -112,9 +112,10 @@ export const SmartBookmarkList: React.FC = () => {
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
+              useBookmarkStore.getState().generateSmartCategories();
             }}
             className="p-2 text-gray-600 hover:text-blue-600 hover:bg-gray-100 rounded-lg transition-colors"
-            title="刷新"
+            title="刷新智能分类"
           >
             <RefreshCw size={18} />
           </button>

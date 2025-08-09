@@ -126,7 +126,7 @@ export const SettingsModal: React.FC = () => {
                     value={tempApiUrl}
                     onChange={(e) => setTempApiUrl(e.target.value)}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    placeholder="https://api.openai.com/v1 或 https://api.groq.com/openai/v1"
+                    placeholder="选择下方其中一个 API 地址"
                   />
                   <div className="text-xs text-gray-500 mt-1 space-y-1">
                     <p className="font-medium">支持的API地址：</p>
