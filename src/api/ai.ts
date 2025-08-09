@@ -8,7 +8,7 @@ interface AIResponse {
 
 // API URL将从参数中获取，不再硬编码
 
-export async function generateTagsAndSummary(bookmark: Bookmark, apiKey: string, apiUrl: string, modelId: string = 'gpt-3.5-turbo', useWebContent: boolean = true): Promise<AIResponse> {
+export async function generateTagsAndSummary(bookmark: Bookmark, apiKey: string, apiUrl: string, modelId?: string, useWebContent: boolean = true): Promise<AIResponse> {
   if (!apiKey) {
     throw new Error('API key is required');
   }
@@ -16,6 +16,11 @@ export async function generateTagsAndSummary(bookmark: Bookmark, apiKey: string,
   if (!apiUrl || apiUrl.trim() === '') {
     throw new Error('API URL is required');
   }
+
+  // 确定API类型和模型
+  const isGroqAPI = apiUrl.toLowerCase().includes('groq.com');
+  const defaultModel = isGroqAPI ? 'llama-3-8b-8192' : 'gpt-3.5-turbo';
+  const modelToUse = modelId || defaultModel;
 
   // 获取网页内容 - 优化：只在需要时获取
   let webContent: WebContent | null = null;
@@ -72,14 +77,36 @@ export async function generateTagsAndSummary(bookmark: Bookmark, apiKey: string,
   const prompt = promptParts.join('\n');
 
   try {
-    // 确保API URL包含完整的端点路径
-    const fullApiUrl = apiUrl.includes('/chat/completions') ? apiUrl : `${apiUrl}/chat/completions`;
+    // 确保API URL正确
+    // 处理 API URL，确保正确的请求路径
+    const isGroqAPI = apiUrl.toLowerCase().includes('groq.com');
+    const baseUrl = apiUrl.endsWith('/') ? apiUrl.slice(0, -1) : apiUrl;
+    const fullApiUrl = isGroqAPI 
+      ? (baseUrl.endsWith('/chat/completions') ? baseUrl : `${baseUrl}/chat/completions`)
+      : (baseUrl.endsWith('/chat/completions') ? baseUrl : `${baseUrl}/chat/completions`);
+    
+    console.log('构建的API URL:', {
+      originalUrl: apiUrl,
+      finalUrl: fullApiUrl,
+      isGroqAPI
+    });
     
     // 使用AbortController添加请求超时控制
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒超时
     
     try {
+      // 确定API类型
+      const isGroqAPI = apiUrl.toLowerCase().includes('groq.com');
+      const defaultModel = isGroqAPI ? 'llama-3-8b-8192' : 'gpt-3.5-turbo';
+      const modelToUse = modelId || defaultModel;
+
+      console.log('发送API请求到:', {
+        url: fullApiUrl,
+        model: modelToUse,
+        apiType: isGroqAPI ? 'Groq' : 'OpenAI'
+      });
+
       const response = await fetch(fullApiUrl, {
         method: 'POST',
         headers: {
@@ -88,7 +115,7 @@ export async function generateTagsAndSummary(bookmark: Bookmark, apiKey: string,
         },
         signal: controller.signal,
         body: JSON.stringify({
-          model: modelId,
+          model: modelToUse,
           messages: [
             {
               role: 'system',
@@ -121,7 +148,7 @@ export async function generateTagsAndSummary(bookmark: Bookmark, apiKey: string,
       
       if (tagMatch && tagMatch[1]) {
         // 处理可能的不同分隔符（逗号、顿号等）
-        tags = tagMatch[1].split(/[,，、]/).map(tag => tag.trim()).filter(Boolean).slice(0, 5);
+        tags = tagMatch[1].split(/[,，、]/).map((tag: string) => tag.trim()).filter(Boolean).slice(0, 5);
       }
       
       if (descMatch && descMatch[1]) {

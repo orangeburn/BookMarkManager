@@ -3,7 +3,7 @@ import { Bookmark, Category } from '../types/bookmark';
 
 declare global {
   interface Window {
-    chrome?: typeof chrome;
+    chrome: typeof chrome;
   }
 }
 
@@ -116,13 +116,13 @@ const loadSettingsFromStorage = async (): Promise<Partial<BookmarkState>> => {
         
         const parsedBookmarks = JSON.parse(storedBookmarks);
         if (parsedBookmarks.bookmarks) {
-          settings.bookmarks = Object.entries(parsedBookmarks.bookmarks).reduce((acc, [id, bookmark]) => {
+          settings.bookmarks = Object.entries(parsedBookmarks.bookmarks).reduce((acc, [id, bookmark]: [string, any]) => {
             acc[id] = {
-              ...bookmark,
-              tags: bookmark.tags || [],
-              summary: bookmark.summary || '',
-              category: bookmark.category || null
-            };
+              ...(bookmark as Partial<Bookmark>),
+              tags: bookmark?.tags || [],
+              summary: bookmark?.summary || '',
+              category: bookmark?.category || null
+            } as Bookmark;
             return acc;
           }, {} as Record<string, Bookmark>);
         }
@@ -207,13 +207,13 @@ const saveBasicSettings = (settings: Partial<BookmarkState>): void => {
     
     // 为了向后兼容，同时保存到单独的localStorage项中
     if (settings.apiKey !== undefined) {
-      localStorage.setItem(STORAGE_KEYS.API_KEY, settings.apiKey);
+      localStorage.setItem(STORAGE_KEYS.API_KEY, settings.apiKey || '');
     }
     if (settings.apiUrl !== undefined) {
-      localStorage.setItem(STORAGE_KEYS.API_URL, settings.apiUrl);
+      localStorage.setItem(STORAGE_KEYS.API_URL, settings.apiUrl || '');
     }
     if (settings.selectedModel !== undefined) {
-      localStorage.setItem(STORAGE_KEYS.SELECTED_MODEL, settings.selectedModel);
+      localStorage.setItem(STORAGE_KEYS.SELECTED_MODEL, settings.selectedModel || '');
     }
     
     // 保存智能分类
@@ -260,11 +260,11 @@ const saveBookmarkData = (settings: Partial<BookmarkState>): void => {
         } else {
           // 如果是新书签，直接使用提供的数据
           acc[id] = {
-            ...bookmark,
-            tags: bookmark.tags || [],
-            summary: bookmark.summary || '',
-            category: bookmark.category || null
-          };
+            ...(bookmark as Partial<Bookmark>),
+            tags: bookmark?.tags || [],
+            summary: bookmark?.summary || '',
+            category: bookmark?.category || undefined
+          } as Bookmark;
         }
         return acc;
       }, {} as Record<string, Bookmark>) : existingBookmarks;
@@ -704,7 +704,14 @@ ${JSON.stringify(bookmarksData, null, 2)}
           console.log('准备发送AI请求...');
           
           // 调用AI API
-          const fullApiUrl = apiUrl.includes('/chat/completions') ? apiUrl : `${apiUrl}/chat/completions`;
+          // 处理 API URL，确保正确的端点路径
+          const isGroqApi = apiUrl.toLowerCase().includes('groq.com');
+          const baseUrl = apiUrl.endsWith('/') ? apiUrl.slice(0, -1) : apiUrl;
+          const fullApiUrl = isGroqApi 
+            ? `${baseUrl}/completion`  // Groq API 使用 /completion 端点
+            : `${baseUrl}/chat/completions`;  // OpenAI API 使用 /chat/completions 端点
+            
+          console.log('构建的API URL:', fullApiUrl);
           console.log('发送API请求到:', fullApiUrl);
           
           const requestBody = {
@@ -962,6 +969,13 @@ ${JSON.stringify(bookmarksData, null, 2)}
       const errorMessage = error instanceof Error ? error.message : '生成智能分类失败';
       console.error('生成智能分类时出错:', error);
       set({ error: errorMessage });
+      
+      // 获取所有无标签无描述的书签ID
+      const allBookmarkIds = Object.keys(get().bookmarks);
+      const uncategorizedBookmarkIds = allBookmarkIds.filter(id => {
+        const bookmark = get().bookmarks[id];
+        return (!bookmark.tags || bookmark.tags.length === 0) && (!bookmark.summary || bookmark.summary.trim() === '');
+      });
       
       // 创建一个只包含未分类项的智能分类列表作为回退方案
       const fallbackCategories = [{
